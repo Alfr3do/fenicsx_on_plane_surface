@@ -201,11 +201,73 @@ def generate_dfg2d_mesh(L=2.2, H=0.41, c_x=0.2, c_y=0.2, r=0.05, preview_mesh="p
     ft.name = "Facet markers"
     return mesh, ft
 
+
+'''
+    gmsh_to_xdmf(gmsh.model.mesh)
+'''
+def gmsh_to_xdmf(mesh):
+    node_tags, node_coords, _ = mesh.getNodes()
+    # Map arbitrary gmsh node tags to contiguous 0-indexed positions
+    node_tag_to_index = {tag: i for i, tag in enumerate(node_tags)}
+    points = node_coords.reshape(-1, 3)[:, :2]  # (x, y) coordinates
+    elem_types, elem_tags, elem_node_tags = mesh.getElements(dim=2)
+    tri_cells = []
+    print(elem_types)
+    for etype, _, enodes in zip(elem_types, elem_tags, elem_node_tags):
+        props = mesh.getElementProperties(etype)
+        num_nodes = props[3]
+        # Reshape the flat node array based on actual nodes per element
+        element_nodes = enodes.reshape(-1, num_nodes)
+        for elem in element_nodes:
+            if num_nodes == 3:
+                # Standard 3-node triangle
+                tri_cells.append([node_tag_to_index[t] for t in elem[:3]])
+            elif num_nodes > 3:
+                # If higher-order elements slipped through, take the first 3 primary corner nodes
+                tri_cells.append([node_tag_to_index[t] for t in elem[:3]])
+            elif num_nodes == 4:
+                # If any quads (type 3) were generated, split them into 2 triangles for FEniCSx
+                p0, p1, p2, p3 = [node_tag_to_index[t] for t in elem[:4]]
+                tri_cells.append([p0, p1, p2])
+                tri_cells.append([p0, p2, p3])
+
+        #if etype == 3:  # 3-node triangle
+        #    tri_nodes = enodes.reshape(-1, 3)
+        #    for tri in tri_nodes:
+        #        tri_cells.append([node_tag_to_index[t] for t in tri])
+    print(f"✅ Mesh generation completed for process '{proc_id}' with {len(points)} vertices and {len(tri_cells)} triangular cells.")
+
+    cells = np.array(tri_cells, dtype=np.int64)
+    mesh_data_payload = {
+        "points": points,
+        "cells": cells
+    }
+    mesh_comm.Barrier()
+    mesh_data_payload = mesh_comm.bcast(mesh_data_payload, root=model_rank)
+    points = mesh_data_payload["points"]
+    points = np.ascontiguousarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 2:
+        points = points.reshape(-1, 2)
+
+        
+    cells = mesh_data_payload["cells"]
+    # Ensure cells are strictly int64 with shape (M, 3)
+    cells = np.ascontiguousarray(cells, dtype=np.int64)
+    if cells.ndim != 2 or cells.shape[1] != 3:
+        cells = cells.reshape(-1, 3)
+
+    # --- Step 3: Build FEniCSx Mesh Natively ---
+    domain = element("Lagrange", "triangle", 1, shape=(2,))
+    mesh = create_mesh(mesh_comm, cells, points, domain)
+    mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
+
+    print(f"✅ Rank {mesh_comm.rank}: Natively created mesh with {mesh.topology.index_map(0).size_global} global vertices.")
+    return mesh
+
+
 '''
   proc_id: process identifer for file generation
-  coastline_points_file: Path to the GeoJSON file containing coastline points.
-  obstacle_points_file: Path to the GeoJSON file containing obstacle points (islands/reefs). 
-                        the file can contain multiple features, each representing a different obstacle.
+  geojson_path: Path to the GeoJSON file containing the features: inlet, outlet, obstacle, source.
   mesh_size_coarse: Coarse mesh size for the outer coastline.
   mesh_size_fine: Fine mesh size for the obstacles.
   preview_mesh: Visualization option for the generated mesh ("pyvista" or "matplotlib").
@@ -244,46 +306,102 @@ def generate_surface_mesh(proc_id, geojson_path, mesh_size_coarse=500.0, mesh_si
 
         # --- Step 1: Parse Features & Create Geometry Entities ---
         all_outer_curves = []
-        for feature in geojson_data["features"]:
+        sources = []
+        first_pt_tag = None  # To remember the very first point for closing the loop
+        prev_end_pt_tag = None
+        line_features = [f for f in geojson_data["features"] if f["geometry"]["type"] == "LineString"]
+        polygon_features = [f for f in geojson_data["features"] if f["geometry"]["type"] == "Polygon"]
+        sources_features =  [f for f in geojson_data["features"] if f["geometry"]["type"] == "Point"]
+
+        min_lat, min_lon = np.inf, np.inf
+        max_lat, max_lon = 0,0
+
+        for i, feature in enumerate(line_features):
             geom = feature["geometry"]
             props = feature["properties"]
             b_type = props.get("boundary_type")
-            g_type = geom["type"]
             coords = geom["coordinates"]
 
-            if g_type == "LineString":
-                pt_tags = []
-                for lon, lat in coords:
-                    x, y = transformer.transform(lon, lat)
+            pt_tags = []
+            for j, (lon, lat) in enumerate(coords):
+                x, y = transformer.transform(lon, lat)
+                if x < min_lon:
+                    min_lon = x
+                if y < min_lat:
+                    min_lat = y
+                if x > max_lon:
+                    max_lon = x
+                if y > max_lat:
+                    max_lat = y
+
+                if j == 0 and prev_end_pt_tag is not None:
+                    pt_tags.append(prev_end_pt_tag)  # Reuse the last point of the previous segment
+                else:
                     tag = occ.addPoint(x, y, 0.0, mesh_size_coarse)
                     pt_tags.append(tag)
-                
-                # Create a B-Spline for this boundary segment
-                spline_tag = occ.addBSpline(pt_tags)
-                
-                # Sort into respective buckets based on GeoJSON property
-                if b_type == "wall":
-                    wall_curves.append(spline_tag)
-                elif b_type == "inlet":
-                    inlet_curves.append(spline_tag)
-                elif b_type == "outlet":
-                    outlet_curves.append(spline_tag)
-                all_outer_curves.append(spline_tag)
+                    if first_pt_tag is None:
+                        first_pt_tag = tag  # Capture the absolute start of the boundary
 
-            elif g_type == "Polygon":
-                # Islands/Obstacles (outer ring is coords[0])
-                ring = coords[0]
-                island_pts = []
-                for lon, lat in ring:
-                    x, y = transformer.transform(lon, lat)
+            # Handle the final loop closure on the very last line segment
+            if i == len(line_features) - 1 and first_pt_tag is not None:
+                # Replace the final point tag with the very first point tag to close the loop
+                pt_tags[-1] = first_pt_tag
+
+            prev_end_pt_tag = pt_tags[-1]
+            
+            # Create a B-Spline for this boundary segment
+            spline_tag = occ.addBSpline(pt_tags)
+            
+            # Sort into respective buckets based on GeoJSON property
+            if b_type == "wall":
+                wall_curves.append(spline_tag)
+            elif b_type == "inlet":
+                inlet_curves.append(spline_tag)
+            elif b_type == "outlet":
+                outlet_curves.append(spline_tag)
+            all_outer_curves.append(spline_tag)
+
+        for feature in polygon_features:
+            geom = feature["geometry"]
+            # Islands/Obstacles (outer ring is coords[0])
+            ring = geom["coordinates"][0]
+            island_pts = []
+            island_first_pt = None
+            for j, (lon, lat) in enumerate(ring):
+                x, y = transformer.transform(lon, lat)
+
+                if j < len(ring) - 1:
                     tag = occ.addPoint(x, y, 0.0, mesh_size_fine) # Finer mesh near islands
                     island_pts.append(tag)
-                
-                island_spline = occ.addBSpline(island_pts)
-                obstacle_curves.append(island_spline)
-                
-                obs_loop = occ.addCurveLoop([island_spline])
-                obstacle_loops.append(obs_loop)
+                    if j == 0:
+                        island_first_pt = tag
+                elif island_first_pt is not None:
+                    island_pts.append(island_first_pt)
+
+            
+            island_spline = occ.addBSpline(island_pts)
+            obstacle_curves.append(island_spline)
+            
+            obs_loop = occ.addCurveLoop([island_spline])
+            obstacle_loops.append(obs_loop)
+
+        x_origin = min_lon
+        y_origin = min_lat
+
+        for feature in sources_features:
+            props = feature["properties"]
+            if 'Q' not in props or 'sigma' not in props:
+                continue
+            geom = feature["geometry"]
+            coords = geom["coordinates"]
+            lon, lat = coords[0], coords[1]
+            x_utm, y_utm = transformer.transform(lon, lat)
+            sources.append({
+                "x": x_utm - x_origin,
+                "y": y_utm - y_origin,
+                "Q": props.get('Q'),
+                "sigma": props.get('sigma')
+            })
 
         # --- Step 2: Build Outer Loop and Water Surface ---
         #all_outer_curves = wall_curves + inlet_curves + outlet_curves
@@ -292,7 +410,7 @@ def generate_surface_mesh(proc_id, geojson_path, mesh_size_coarse=500.0, mesh_si
         # Create surface with holes (islands)
         water_surface = occ.addPlaneSurface([outer_loop] + obstacle_loops)
         occ.synchronize()
-        gmsh.model.occ.removeAllDuplicates()
+        occ.removeAllDuplicates()
         occ.synchronize()
 
         # --- Step 3: Define Physical Groups (Annotation for DOLFINx) ---
@@ -318,64 +436,30 @@ def generate_surface_mesh(proc_id, geojson_path, mesh_size_coarse=500.0, mesh_si
             gmsh.model.setPhysicalName(1, OBSTACLE_MARKER, "Obstacle")
 
         # Generate 2D mesh
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        gmsh.option.setNumber("Mesh.Algorithm", 8)
         gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 2)
-        gmsh.option.setNumber("Mesh.RecombineAll", 0)
+        gmsh.option.setNumber("Mesh.RecombineAll", 1)
         gmsh.option.setNumber("Mesh.SubdivisionAlgorithm", 1)
 
         # Force Gmsh to use linear elements (3-node triangles, type 2)
         gmsh.option.setNumber("Mesh.ElementOrder", 1)
         gmsh.model.mesh.generate(gdim)
-        #gmsh.model.mesh.setOrder(2)
+        gmsh.model.mesh.setOrder(2)
         gmsh.model.mesh.optimize("Netgen")
 
-        node_tags, node_coords, _ = gmsh.model.mesh.getNodes()
-        # Map arbitrary gmsh node tags to contiguous 0-indexed positions
-        node_tag_to_index = {tag: i for i, tag in enumerate(node_tags)}
-        points = node_coords.reshape(-1, 3)[:, :2]  # (x, y) coordinates
-        elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
-        tri_cells = []
-        print(elem_types)
-        for etype, _, enodes in zip(elem_types, elem_tags, elem_node_tags):
-            props = gmsh.model.mesh.getElementProperties(etype)
-            num_nodes = props[3]
-            # Reshape the flat node array based on actual nodes per element
-            element_nodes = enodes.reshape(-1, num_nodes)
-            for elem in element_nodes:
-                if num_nodes == 3:
-                    # Standard 3-node triangle
-                    tri_cells.append([node_tag_to_index[t] for t in elem[:3]])
-                elif num_nodes > 3:
-                    # If higher-order elements slipped through, take the first 3 primary corner nodes
-                    tri_cells.append([node_tag_to_index[t] for t in elem[:3]])
-                elif num_nodes == 4:
-                    # If any quads (type 3) were generated, split them into 2 triangles for FEniCSx
-                    p0, p1, p2, p3 = [node_tag_to_index[t] for t in elem[:4]]
-                    tri_cells.append([p0, p1, p2])
-                    tri_cells.append([p0, p2, p3])
-
-            #if etype == 3:  # 3-node triangle
-            #    tri_nodes = enodes.reshape(-1, 3)
-            #    for tri in tri_nodes:
-            #        tri_cells.append([node_tag_to_index[t] for t in tri])
-        print(f"✅ Mesh generation completed for process '{proc_id}' with {len(points)} vertices and {len(tri_cells)} triangular cells.")
-
-        cells = np.array(tri_cells, dtype=np.int64)
-        mesh_data_payload = {
-            "points": points,
-            "cells": cells
-        }
-
         # --- Native Gmsh Off-Screen Preview Rendering ---
-        #gmsh.fltk.initialize()
         os.makedirs("figures", exist_ok=True)
         image_path = f"figures/mesh_preview_{proc_id}.png"
 
         #gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
+        occ.synchronize()
+        occ.removeAllDuplicates()
+        occ.synchronize()
+
         gmsh.write(mesh_filename)
         
         if preview_mesh == "pyvista":
-            temp_vtk = f"temp_preview_{proc_id}-3.vtk"
+            temp_vtk = f"temp_preview_{proc_id}.vtk"
             gmsh.write(temp_vtk)
             grid = pv.read(temp_vtk)
             plotter = pv.Plotter(off_screen=True)
@@ -385,28 +469,7 @@ def generate_surface_mesh(proc_id, geojson_path, mesh_size_coarse=500.0, mesh_si
             plotter.close()
 
         gmsh.finalize()
-
-    mesh_comm.Barrier()
-    mesh_data_payload = mesh_comm.bcast(mesh_data_payload, root=model_rank)
-    points = mesh_data_payload["points"]
-    points = np.ascontiguousarray(points, dtype=np.float64)
-    if points.ndim != 2 or points.shape[1] != 2:
-        points = points.reshape(-1, 2)
-
-        
-    cells = mesh_data_payload["cells"]
-    # Ensure cells are strictly int64 with shape (M, 3)
-    cells = np.ascontiguousarray(cells, dtype=np.int64)
-    if cells.ndim != 2 or cells.shape[1] != 3:
-        cells = cells.reshape(-1, 3)
-
-    # --- Step 3: Build FEniCSx Mesh Natively ---
-    domain = element("Lagrange", "triangle", 1, shape=(2,))
-    mesh = create_mesh(mesh_comm, cells, points, domain)
-    mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
-
-    print(f"✅ Rank {mesh_comm.rank}: Natively created mesh with {mesh.topology.index_map(0).size_global} global vertices.")
-    return mesh
+        return sources, [(min_lon, min_lat), (max_lon, max_lat)]
 
 
 def load_mesh( proc_id="bay"):
@@ -415,17 +478,16 @@ def load_mesh( proc_id="bay"):
     mesh_filename = f"mesh_{proc_id}.msh"
 
     ## Collective parallel read for FEniCSx solver
-    mesh, _, ft = gmshio.read_from_msh(mesh_filename, mesh_comm, model_rank, gdim=2)
+    mesh_data = gmshio.read_from_msh(mesh_filename, mesh_comm, model_rank, gdim=2)
     mesh_comm.Barrier()  
-    #mesh = mesh_data[0]
-    #ft = mesh_data[2]
-    #ft.name = "Facet markers"
-    return None, None
-    #return mesh, ft
+    mesh = mesh_data[0]
+    ft = mesh_data[2]
+    ft.name = "Facet markers"
+    return mesh, ft
 
-def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
+def run_ipcs_solver(mesh, ft, sources=[], T=8.0, dt=1/1600, gdim=2, verify=False):
     if mesh.comm.rank == 0:
-        print(f"🚀 Starting Navier-Stokes IPCS Solver (T={T}s, dt={dt}s)...")
+        print(f"🚀 Starting Navier-Stokes IPCS Solver (T={T}s, dt={dt}s) sources {sources}...")
     
     t = 0.0
     T = 8.0  # Final time
@@ -437,8 +499,10 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
 
     v_cg2 = element("Lagrange", mesh.basix_cell(), 2, shape=(mesh.geometry.dim,))
     s_cg1 = element("Lagrange", mesh.basix_cell(), 1)
+    c_element = element("Lagrange", mesh.basix_cell(), 1)
     V = functionspace(mesh, v_cg2)
     Q = functionspace(mesh, s_cg1)
+    C_space = functionspace(mesh, c_element)
 
     fdim = mesh.topology.dim - 1
 
@@ -488,6 +552,14 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
     p_ = Function(Q, name="p")
     phi = Function(Q, name="phi")
 
+    c = TrialFunction(C_space)
+    q_c = TestFunction(C_space)
+    c_ = Function(C_space, name="c")       # Solution at step n+1
+    c_n = Function(C_space, name="c_n")     # Solution at step n
+
+    # Physical constants
+    D = Constant(mesh, PETSc.ScalarType(0.001))   # Diffusivity
+    K = Constant(mesh, PETSc.ScalarType(0.01))    # Reaction / decay rate
 
     f = Constant(mesh, PETSc.ScalarType((0, 0)))
     F1 = rho / k * dot(u - u_n, v) * dx
@@ -512,6 +584,49 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
     A3.assemble()
     b3 = create_vector(extract_function_spaces(L3))
 
+    # Point source (e.g., Gaussian injection near (x0, y0))
+    class MultiPointGaussianSource:
+        """Evaluates multi-point Gaussian plume injections across FEniCSx mesh nodes."""
+        def __init__(self, sources, t=0.0):
+            self.sources = sources  # List of dicts: [{'x', 'y', 'Q', 'sigma'}, ...]
+            self.t = t
+
+        def __call__(self, x):
+            # x has shape (gdim, num_nodes); x[0] is X-coords, x[1] is Y-coords
+            values = np.zeros(x.shape[1], dtype=np.float64)
+            
+            for src in self.sources:
+                # Distance squared from current source center
+                dist_sq = (x[0] - src["x"])**2 + (x[1] - src["y"])**2
+                
+                # Smooth Gaussian spatial distribution: S(x,y) = Q * exp(-dist^2 / (2 * sigma^2))
+                values += src["Q"] * np.exp(-dist_sq / (2.0 * src["sigma"]**2))
+                
+            return values
+    class SourceExpression:
+        def __init__(self, t):
+            self.t = t
+        def __call__(self, x):
+            return 10.0 * np.exp(-((x[0] - 0.15)**2 + (x[1] - 0.2)**2) / 0.005)
+
+    S_func = Function(C_space, name="SourceTerm")
+    S_expr = MultiPointGaussianSource(sources, t=0.0)
+    #= SourceExpression(t)
+    S_func.interpolate(S_expr)
+
+    # Weak formulation
+    F_c = (c - c_n) / k * q_c * dx \
+        + dot(u_, grad(c)) * q_c * dx \
+        + D * inner(grad(c), grad(q_c)) * dx \
+        + K * c * q_c * dx \
+        - S_func * q_c * dx
+
+    a4 = form(lhs(F_c))
+    L4 = form(rhs(F_c))
+
+    A4 = assemble_matrix(a4)
+    A4.assemble()
+    b4 = create_vector(extract_function_spaces(L4))
 
     # Solver for step 1
     solver1 = PETSc.KSP().create(mesh.comm)
@@ -535,6 +650,13 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
     pc3 = solver3.getPC()
     pc3.setType(PETSc.PC.Type.SOR)
 
+    # PETSc solver for step 4
+    solver4 = PETSc.KSP().create(mesh.comm)
+    solver4.setOperators(A4)
+    solver4.setType(PETSc.KSP.Type.GMRES)
+    pc4 = solver4.getPC()
+    pc4.setType(PETSc.PC.Type.HYPRE)
+    pc4.setHYPREType("boomeramg")
 
     n = -FacetNormal(mesh)  # Normal pointing out of obstacle
     dObs = Measure("ds", domain=mesh, subdomain_data=ft, subdomain_id=OBSTACLE_MARKER)
@@ -558,14 +680,14 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
         p_diff = np.zeros(num_steps, dtype=PETSc.ScalarType)
 
 
-
-
     folder = Path("results")
     folder.mkdir(exist_ok=True, parents=True)
     vtx_u = VTXWriter(mesh.comm, folder / "dfg2D-3-u.bp", [u_], engine="BP4")
     vtx_p = VTXWriter(mesh.comm, folder / "dfg2D-3-p.bp", [p_], engine="BP4")
+    vtx_c = VTXWriter(mesh.comm, folder / "dfg2D-3-c.bp", [c_], engine="BP4")
     vtx_u.write(t)
     vtx_p.write(t)
+    vtx_c.write(t)
     progress = tqdm.autonotebook.tqdm(desc="Solving PDE", total=num_steps)
     for i in range(num_steps):
         progress.update(1)
@@ -609,9 +731,27 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
         solver3.solve(b3, u_.x.petsc_vec)
         u_.x.scatter_forward()
 
+        # Step 4: Concentration Transport Step
+        A4.zeroEntries()
+        assemble_matrix(A4, a4)
+        A4.assemble()
+        
+        with b4.localForm() as loc:
+            loc.set(0)
+        assemble_vector(b4, L4)
+        b4.ghostUpdate(addv=PETSc.InsertMode.ADD_VALUES, mode=PETSc.ScatterMode.REVERSE)
+        
+        solver4.solve(b4, c_.x.petsc_vec)
+        c_.x.scatter_forward()
+
+        # Update previous step concentration
+        c_.x.petsc_vec.copy(c_n.x.petsc_vec)
+
+
         # Write solutions to file
         vtx_u.write(t)
         vtx_p.write(t)
+        vtx_c.write(t)
 
         # Update variable with solution form this time step
         with (
@@ -652,17 +792,21 @@ def run_ipcs_solver(mesh, ft, T=8.0, dt=1/1600, gdim=2, verify=False):
     progress.close()
     vtx_u.close()
     vtx_p.close()
+    vtx_c.close
 
 
     A1.destroy()
     A2.destroy()
     A3.destroy()
+    A4.destroy()
     b1.destroy()
     b2.destroy()
     b3.destroy()
+    b4.destroy()
     solver1.destroy()
     solver2.destroy()
     solver3.destroy()
+    solver4.destroy()
     if  verify and mesh.comm.rank == 0:
         run_verification(mesh, ft, t_u, C_D, C_L, t_p, p_diff)
 
@@ -757,25 +901,31 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DFG 2D-3 Navier-Stokes Solver with Modular Mesh Control")
     parser.add_argument("--mesh-only", action="store_true", help="Generate and visualize mesh without running PDE solver")
     parser.add_argument("--verify", action="store_true", help="Verify solver results against benchmark data and generate comparison plots")
-    parser.add_argument("--use_matplotlib", action="store_true", help="Use matplotlib for mesh visualization")
+    parser.add_argument("--use-matplotlib", action="store_true", help="Use matplotlib for mesh visualization")
+    parser.add_argument("-c", "--size-coarse", type=float, default=500.0, help="The Mesh size at coarse intended domain")
+    parser.add_argument("-f", "--size-fine", type=float, default=500.0, help="The Mesh size at fine intended domain")
     args = parser.parse_args()
 
 
     preview = "matplotlib" if args.use_matplotlib else "pyvista"
 
     #mesh, ft = generate_dfg2d_mesh(preview_mesh=preview)
+    #bbc-harbor-shoreline.geojson
+    #simple-surface.geojson
+    #simplified-bbc-shoreline-island.geojson
+    #simplif'ied-bbc-shoreline.geojson
+    sources,bbox = generate_surface_mesh(proc_id="test0", geojson_path="./test-data/simplified-bbc-shoreline-island.geojson", mesh_size_coarse=args.size_coarse, mesh_size_fine=args.size_fine)
+    L_ref = bbox[1][0] - bbox[0][0]
+    print(L_ref)
+    sources = comm.bcast(sources, root=0)
+    comm.Barrier() 
+    mesh, ft = load_mesh(proc_id="test0")
+    if args.mesh_only:
+        if rank == 0:
+            print("Stopped execution after mesh generation (--mesh-only flag set).")
+        sys.exit(0)
     
-    generate_surface_mesh(proc_id="test1", geojson_path="./test-data/bbc-harbor-shoreline.geojson", mesh_size_coarse=100.0, mesh_size_fine=20.0)
-    
-    #mesh, ft = load_mesh(proc_id="test1")
-
-    #if args.mesh_only:
-    #    if rank == 0:
-    #        print("Stopped execution after mesh generation (--mesh-only flag set).")
-    #    sys.exit(0)
-#
-    #
-    #if args.verify:
-    #    run_ipcs_solver(mesh, ft, verify=True)
-    #else:
-    #    run_ipcs_solver(mesh, ft)
+    if args.verify:
+        run_ipcs_solver(mesh, ft, sources=sources, verify=True)
+    else:
+        run_ipcs_solver(mesh, ft, sources=sources)

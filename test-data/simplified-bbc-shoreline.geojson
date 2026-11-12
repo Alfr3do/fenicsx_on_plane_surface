@@ -1,0 +1,191 @@
+{
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.141898,
+                        25.900827],
+                    [-80.143215,
+                        25.901388],
+                    [-80.134973,
+                        25.90477],
+                    [-80.137867,
+                        25.908068],
+                    [-80.136697,
+                        25.910189],
+                    [-80.138937,
+                        25.913951]]
+            },
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.138937,
+                        25.913951],
+                    [-80.138699,
+                        25.914183]]
+            },
+            "properties": {
+                "boundary_type": "outlet",
+                "marker_id": 3
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.138699,
+                        25.914183],
+                    [-80.135845,
+                        25.91076],
+                    [-80.135171,
+                        25.910885],
+                    [-80.134695,
+                        25.914218],
+                    [-80.133816,
+                        25.916424]]
+            },
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.133816,
+                        25.916424],
+                    [-80.13334,
+                        25.916353]]
+            },
+            "properties": {
+                "boundary_type": "outlet",
+                "marker_id": 3
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.13334,
+                        25.916353],
+                    [-80.134252,
+                        25.913055],
+                    [-80.131735,
+                        25.912734],
+                    [-80.134688,
+                        25.909222],
+                    [-80.133003,
+                        25.908883],
+                    [-80.133128,
+                        25.906902],
+                    [-80.13164,
+                        25.905733],
+                    [-80.129986,
+                        25.906959],
+                    [-80.128317,
+                        25.912978]]
+            },
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.128317,
+                        25.912978],
+                    [-80.124951,
+                        25.912978]]
+            },
+            "properties": {
+                "boundary_type": "outlet",
+                "marker_id": 3
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.124951,
+                        25.912978],
+                    [-80.125861,
+                        25.902536],
+                    [-80.125336,
+                        25.9007],
+                    [-80.122017,
+                        25.900593]]
+            },
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.122017,
+                        25.900593],
+                    [-80.122017,
+                        25.899522]]
+            },
+            "properties": {
+                "boundary_type": "inlet",
+                "marker_id": 2
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.122017,
+                        25.899522],
+                    [-80.126979,
+                        25.899253],
+                    [-80.12938,
+                        25.897104],
+                    [-80.129899,
+                        25.895511]]
+            },
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.129899,
+                        25.895511],
+                    [-80.141898,
+                        25.900827]
+                    ]
+            },
+            "properties": {
+                "boundary_type": "outlet",
+                "marker_id": 3
+            }
+        }]
+}

@@ -1,0 +1,80 @@
+{
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.141017, 25.900205],
+                    [-80.134291, 25.905976
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 3
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.134291, 25.905976],
+                    [-80.125323, 25.900732
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "boundary_type": "inlet",
+                "marker_id": 2
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.125323, 25.900732],
+                    [-80.125354, 25.899344
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "boundary_type": "wall",
+                "marker_id": 4
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.125354, 25.899344],
+                    [-80.131069, 25.895402
+                    ]
+                ]
+            }
+        },
+        {
+            "type": "Feature",
+            "properties": {
+                "boundary_type": "outlet",
+                "marker_id": 3
+            },
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [
+                    [-80.131069, 25.895402],
+                    [-80.141017, 25.900205
+                    ]
+                ]
+            }
+        }
+    ]
+}
