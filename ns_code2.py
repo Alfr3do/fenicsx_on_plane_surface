@@ -469,7 +469,8 @@ def generate_surface_mesh(proc_id, geojson_path, mesh_size_coarse=500.0, mesh_si
             plotter.close()
 
         gmsh.finalize()
-        return sources, [(min_lon, min_lat), (max_lon, max_lat)]
+        bbox = [(min_lon, min_lat), (max_lon, max_lat)]
+        return sources, bbox 
 
 
 def load_mesh( proc_id="bay"):
@@ -490,8 +491,8 @@ def run_ipcs_solver(mesh, ft, sources=[], T=8.0, dt=1/1600, gdim=2, verify=False
         print(f"🚀 Starting Navier-Stokes IPCS Solver (T={T}s, dt={dt}s) sources {sources}...")
     
     t = 0.0
-    T = 8.0  # Final time
-    dt = 1 / 1600  # Time step size
+    #T = 8.0  # Final time
+    #dt = 1 / 1600  # Time step size
     num_steps = int(T / dt)
     k = Constant(mesh, PETSc.ScalarType(dt))
     mu = Constant(mesh, PETSc.ScalarType(0.001))  # Dynamic viscosity
@@ -914,9 +915,11 @@ if __name__ == "__main__":
     #simple-surface.geojson
     #simplified-bbc-shoreline-island.geojson
     #simplif'ied-bbc-shoreline.geojson
-    sources,bbox = generate_surface_mesh(proc_id="test0", geojson_path="./test-data/simplified-bbc-shoreline-island.geojson", mesh_size_coarse=args.size_coarse, mesh_size_fine=args.size_fine)
-    L_ref = bbox[1][0] - bbox[0][0]
-    print(L_ref)
+    sources = []
+    if rank == 0:
+        sources,bbox = generate_surface_mesh(proc_id="test0", geojson_path="./test-data/simplified-bbc-shoreline-island.geojson", mesh_size_coarse=args.size_coarse, mesh_size_fine=args.size_fine)
+        L_ref = bbox[1][0] - bbox[0][0]
+        print(L_ref)
     sources = comm.bcast(sources, root=0)
     comm.Barrier() 
     mesh, ft = load_mesh(proc_id="test0")

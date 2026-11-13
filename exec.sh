@@ -1,0 +1,1 @@
+mpirun -n 4 python3 ns_code2.py --interactive $*
